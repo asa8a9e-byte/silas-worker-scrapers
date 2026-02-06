@@ -1,0 +1,16 @@
+{
+  "version": "1.1.0",
+  "updated_at": "2026-02-06T17:00:00",
+  "changelog": "詳細版Google Mapsスクレイパー（写真・口コミ・最新投稿対応）",
+  "files": [
+    "google_maps.py",
+    "houzz.py",
+    "reshopnavi.py",
+    "garden_club.py",
+    "garden_plat.py",
+    "ieto.py",
+    "ietatta.py",
+    "hagukumi.py",
+    "constmap.py"
+  ]
+}
