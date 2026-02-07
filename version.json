@@ -1,7 +1,7 @@
 {
-  "version": "1.3.0",
-  "updated_at": "2026-02-07T10:15:00",
-  "changelog": "executor.pyを自動更新対象に追加",
+  "version": "1.4.0",
+  "updated_at": "2026-02-07T12:00:00",
+  "changelog": "MEO診断チェッカー: 診断実行機能、インサイト・口コミ増加データ追加（ローカル版と同等）",
   "files": [
     "executor.py",
     "google_maps.py",

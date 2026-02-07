@@ -584,6 +584,7 @@ class ScrapingExecutor:
         MeoCheckerScraper = _import_scraper("meo_checker", "MeoCheckerScraper")
 
         accounts = filters.get("accounts", [])
+        run_diagnosis = filters.get("runDiagnosis", True)  # デフォルトでTrue
 
         if not accounts:
             self.client.send_error(task_id, "アカウントが指定されていません")
@@ -591,6 +592,7 @@ class ScrapingExecutor:
 
         print(f"[Executor] MEO診断チェック開始")
         print(f"[Executor] アカウント数: {len(accounts)}")
+        print(f"[Executor] 診断実行: {run_diagnosis}")
 
         def on_progress(current, total):
             self.client.send_progress(task_id, current, total)
@@ -608,7 +610,7 @@ class ScrapingExecutor:
                 is_running_check=is_running,
             )
             self._current_scraper = scraper
-            count = scraper.run(accounts)
+            count = scraper.run(accounts, run_diagnosis=run_diagnosis)
             if not self._stop_flag:
                 self.client.send_completed(task_id)
                 print(f"[Executor] 完了: {count}件取得")
