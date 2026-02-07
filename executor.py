@@ -11,7 +11,7 @@ import importlib
 from typing import Optional, Any
 from pathlib import Path
 
-from client import SaaSClient
+# SaaSClientはapp_menubar.pyから渡されるので、ここではインポート不要
 
 
 def _get_update_dir() -> Path:
