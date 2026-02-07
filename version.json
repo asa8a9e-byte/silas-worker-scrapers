@@ -1,7 +1,7 @@
 {
-  "version": "1.4.0",
-  "updated_at": "2026-02-07T12:00:00",
-  "changelog": "MEO診断チェッカー: 診断実行機能、インサイト・口コミ増加データ追加（ローカル版と同等）",
+  "version": "1.4.1",
+  "updated_at": "2026-02-07T23:10:00",
+  "changelog": "executor.py型ヒント修正（SaaSClient）",
   "files": [
     "executor.py",
     "google_maps.py",

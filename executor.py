@@ -58,7 +58,7 @@ def _import_scraper(module_name: str, class_name: str):
 class ScrapingExecutor:
     """SaaSからのスクレイピング指示を実行"""
 
-    def __init__(self, client: SaaSClient):
+    def __init__(self, client):
         self.client = client
         self.client.on_request = self.handle_request
         self.current_task_id: Optional[str] = None
