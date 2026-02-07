@@ -1,8 +1,9 @@
 {
-  "version": "1.2.0",
-  "updated_at": "2026-02-07T06:00:00",
-  "changelog": "MEO診断チェッカー追加",
+  "version": "1.3.0",
+  "updated_at": "2026-02-07T10:15:00",
+  "changelog": "executor.pyを自動更新対象に追加",
   "files": [
+    "executor.py",
     "google_maps.py",
     "houzz.py",
     "reshopnavi.py",
