@@ -9,6 +9,7 @@ JPX 銘柄一覧 URL:
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -130,3 +131,25 @@ def chunked(it: Iterable[_T], size: int) -> Iterator[list[_T]]:
             buf = []
     if buf:
         yield buf
+
+
+async def upsert_jpx_rows(supabase: object, rows: list[JpxRow], batch_size: int = 500) -> int:
+    """JpxRow を listed_companies に batch upsert. 戻り値は処理件数."""
+
+    def _run_batch(batch: list[JpxRow]) -> None:
+        payload = [
+            {
+                "ticker_code": r.ticker_code,
+                "company_name": r.company_name,
+                "market": r.market,
+                "sector": r.sector,
+            }
+            for r in batch
+        ]
+        supabase.table("listed_companies").upsert(payload, on_conflict="ticker_code").execute()
+
+    total = 0
+    for batch in chunked(rows, batch_size):
+        await asyncio.to_thread(_run_batch, batch)
+        total += len(batch)
+    return total
