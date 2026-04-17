@@ -12,6 +12,7 @@ from typing import Any
 
 import fitz  # PyMuPDF
 from google.cloud import vision
+from openai import AsyncOpenAI
 
 
 def extract_text_pymupdf(pdf_path: str | Path) -> tuple[str, int]:
@@ -86,8 +87,9 @@ def extract_text_cloud_vision(pdf_bytes: bytes) -> str:
     client = vision.ImageAnnotatorClient()
     image = vision.Image(content=pdf_bytes)
     response = client.document_text_detection(image=image)
-    if response.full_text_annotation:
-        return response.full_text_annotation.text or ""
+    ann = response.full_text_annotation
+    if ann:
+        return ann.text or ""
     return ""
 
 
@@ -145,3 +147,61 @@ def process_pdf(
         "chunk_count": len(chunks),
         "method": method,
     }
+
+
+async def generate_embeddings(
+    chunks: list[dict[str, Any]],
+    model: str = "text-embedding-3-small",
+    batch_size: int = 100,
+) -> list[dict[str, Any]]:
+    """チャンクに OpenAI embedding を付与して返す（元の dict に ``embedding`` を追加）。"""
+    if not chunks:
+        return []
+
+    client = AsyncOpenAI()
+    result: list[dict[str, Any]] = []
+
+    for i in range(0, len(chunks), batch_size):
+        batch = chunks[i : i + batch_size]
+        texts = [c["text"] for c in batch]
+        response = await client.embeddings.create(input=texts, model=model)
+        for c, emb_data in zip(batch, response.data):
+            result.append({**c, "embedding": emb_data.embedding})
+
+    return result
+
+
+async def process_pdf_with_embedding(
+    pdf_path: str | Path,
+    supabase: Any,
+    document_id: int,
+    force_ocr: bool = False,
+) -> dict[str, Any]:
+    """process_pdf に続けて embedding を生成し ``ir_chunks`` を更新する。"""
+    stats = process_pdf(pdf_path, supabase, document_id, force_ocr=force_ocr)
+
+    res = (
+        supabase.table("ir_chunks")
+        .select("id, chunk_index, chunk_text")
+        .eq("document_id", document_id)
+        .order("chunk_index")
+        .execute()
+    )
+    rows = res.data or []
+    chunks_from_db = [
+        {"chunk_index": r["chunk_index"], "text": r["chunk_text"], "id": r["id"]}
+        for r in rows
+    ]
+
+    if chunks_from_db:
+        embedded = await generate_embeddings(chunks_from_db)
+        for e in embedded:
+            supabase.table("ir_chunks").update(
+                {
+                    "embedding": e["embedding"],
+                    "embedding_model": "text-embedding-3-small",
+                }
+            ).eq("id", e["id"]).execute()
+
+    stats["embeddings_generated"] = len(chunks_from_db)
+    return stats
