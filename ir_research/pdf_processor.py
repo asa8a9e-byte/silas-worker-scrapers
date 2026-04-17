@@ -1,7 +1,7 @@
 """
-IR 文書 PDF のテキスト抽出とチャンク分割（Phase B Task 1）。
+IR 文書 PDF のテキスト抽出 →（必要時 OCR）→ チャンク → DB 保存（Phase B）。
 
-Phase B Task 2 以降で Cloud Vision OCR・Embedding・DB 連携を追加。
+Task 3 で Embedding を追加。
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import fitz  # PyMuPDF
+from google.cloud import vision
 
 
 def extract_text_pymupdf(pdf_path: str | Path) -> tuple[str, int]:
@@ -75,3 +76,72 @@ def chunk_text(
 def content_hash(text: str) -> str:
     """テキストの SHA-256 ヘキスト（重複検知・再処理判定用）。"""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def extract_text_cloud_vision(pdf_bytes: bytes) -> str:
+    """Google Cloud Vision の document_text_detection で PDF バイト列を OCR する。
+
+    認証は環境変数 ``GOOGLE_APPLICATION_CREDENTIALS`` 等、google-cloud 標準に従う。
+    """
+    client = vision.ImageAnnotatorClient()
+    image = vision.Image(content=pdf_bytes)
+    response = client.document_text_detection(image=image)
+    if response.full_text_annotation:
+        return response.full_text_annotation.text or ""
+    return ""
+
+
+def process_pdf(
+    pdf_path: str | Path,
+    supabase: Any,
+    document_id: int,
+    force_ocr: bool = False,
+) -> dict[str, Any]:
+    """PyMuPDF で抽出し、不足時は Cloud Vision にフォールバックしてチャンク化し DB を更新する。
+
+    Returns:
+        text_length, page_count, chunk_count, method
+    """
+    path = Path(pdf_path)
+    text, page_count = extract_text_pymupdf(path)
+    method = "pymupdf"
+
+    if force_ocr or is_ocr_needed(text, page_count):
+        pdf_bytes = path.read_bytes()
+        text = extract_text_cloud_vision(pdf_bytes)
+        method = "cloud_vision"
+
+    c_hash = content_hash(text)
+    chunks = chunk_text(text)
+
+    supabase.table("ir_documents").update(
+        {
+            "markdown_content": text,
+            "extraction_method": method,
+            "extraction_status": "完了",
+            "content_hash": c_hash,
+            "page_count": page_count,
+        }
+    ).eq("id", document_id).execute()
+
+    supabase.table("ir_chunks").delete().eq("document_id", document_id).execute()
+
+    chunk_rows = [
+        {
+            "document_id": document_id,
+            "chunk_index": c["chunk_index"],
+            "chunk_text": c["text"],
+            "chunk_start": c["chunk_start"],
+            "chunk_end": c["chunk_end"],
+        }
+        for c in chunks
+    ]
+    if chunk_rows:
+        supabase.table("ir_chunks").insert(chunk_rows).execute()
+
+    return {
+        "text_length": len(text),
+        "page_count": page_count,
+        "chunk_count": len(chunks),
+        "method": method,
+    }
