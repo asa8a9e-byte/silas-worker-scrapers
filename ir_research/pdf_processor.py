@@ -7,11 +7,12 @@ Task 3 で Embedding を追加。
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 from typing import Any
 
 import fitz  # PyMuPDF
-from google.cloud import vision
+from google.cloud import documentai_v1 as documentai
 from openai import AsyncOpenAI
 
 
@@ -33,7 +34,10 @@ def extract_text_pymupdf(pdf_path: str | Path) -> tuple[str, int]:
 
 
 def is_ocr_needed(text: str, page_count: int, threshold: int = 100) -> bool:
-    """1 ページあたりの平均文字数が threshold 未満なら OCR が必要とみなす。"""
+    """1 ページあたりの平均文字数が threshold 未満なら OCR が必要とみなす。
+
+    True のとき ``process_pdf`` は Google Document AI（Layout Parser 想定）へフォールバックする。
+    """
     if page_count <= 0:
         return True
     avg_chars = len(text.strip()) / page_count
@@ -79,18 +83,33 @@ def content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def extract_text_cloud_vision(pdf_bytes: bytes) -> str:
-    """Google Cloud Vision の document_text_detection で PDF バイト列を OCR する。
+def extract_text_document_ai(
+    pdf_bytes: bytes,
+    project_id: str | None = None,
+    location: str = "us",
+    processor_id: str | None = None,
+) -> str:
+    """Google Document AI で PDF を OCR。Layout Parser プロセッサで表組み・レイアウト構造を保持。
 
-    認証は環境変数 ``GOOGLE_APPLICATION_CREDENTIALS`` 等、google-cloud 標準に従う。
+    認証は ``GOOGLE_APPLICATION_CREDENTIALS`` 等、google-cloud 標準に従う。
+    プロセッサ ID は ``DOCUMENT_AI_PROCESSOR_ID``、プロジェクトは ``GOOGLE_CLOUD_PROJECT`` で指定可能。
     """
-    client = vision.ImageAnnotatorClient()
-    image = vision.Image(content=pdf_bytes)
-    response = client.document_text_detection(image=image)
-    ann = response.full_text_annotation
-    if ann:
-        return ann.text or ""
-    return ""
+    project_id = project_id or os.environ.get("GOOGLE_CLOUD_PROJECT")
+    processor_id = processor_id or os.environ.get("DOCUMENT_AI_PROCESSOR_ID")
+
+    client = documentai.DocumentProcessorServiceClient()
+    resource_name = client.processor_path(project_id, location, processor_id)
+
+    raw_document = documentai.RawDocument(
+        content=pdf_bytes, mime_type="application/pdf"
+    )
+    request = documentai.ProcessRequest(name=resource_name, raw_document=raw_document)
+
+    result = client.process_document(request=request)
+    doc = result.document
+    if not doc:
+        return ""
+    return doc.text or ""
 
 
 def process_pdf(
@@ -99,7 +118,7 @@ def process_pdf(
     document_id: int,
     force_ocr: bool = False,
 ) -> dict[str, Any]:
-    """PyMuPDF で抽出し、不足時は Cloud Vision にフォールバックしてチャンク化し DB を更新する。
+    """PyMuPDF で抽出し、不足時は Document AI にフォールバックしてチャンク化し DB を更新する。
 
     Returns:
         text_length, page_count, chunk_count, method
@@ -110,8 +129,8 @@ def process_pdf(
 
     if force_ocr or is_ocr_needed(text, page_count):
         pdf_bytes = path.read_bytes()
-        text = extract_text_cloud_vision(pdf_bytes)
-        method = "cloud_vision"
+        text = extract_text_document_ai(pdf_bytes)
+        method = "document_ai"
 
     c_hash = content_hash(text)
     chunks = chunk_text(text)
