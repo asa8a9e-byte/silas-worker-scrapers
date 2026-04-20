@@ -68,9 +68,12 @@ class GardenplatScraper:
                 self.result_count += 1
                 if self.result_callback:
                     self.result_callback(result)
-                if self.progress_callback:
-                    self.progress_callback(self.result_count, total)
                 print(f"[GardenPlat] [{shop_id}] ✓ {result.get('company_name', '')[:30]}")
+
+            # 進捗は「処理済みID数/全ID数」で毎回報告（該当なしIDも前進させる）
+            if self.progress_callback:
+                processed = shop_id - start_id + 1
+                self.progress_callback(processed, total)
 
             # リクエスト間隔
             time.sleep(random.uniform(0.3, 0.6))
