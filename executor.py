@@ -172,6 +172,8 @@ class ScrapingExecutor:
                 self._run_garden_plat(task_id, filters)
             elif scraper_type == "constmap":
                 self._run_constmap(task_id, filters)
+            elif scraper_type == "hotpepper":
+                self._run_hotpepper(task_id, filters)
             elif scraper_type == "meo_checker":
                 self._run_meo_checker(task_id, filters)
             else:
@@ -573,6 +575,43 @@ class ScrapingExecutor:
                 print(f"[Executor] 停止: {count}件取得済み")
         except Exception as e:
             print(f"[Executor] コンストマップスクレイピングエラー: {e}")
+            import traceback
+            traceback.print_exc()
+            self.client.send_error(task_id, str(e))
+        finally:
+            self._current_scraper = None
+
+    def _run_hotpepper(self, task_id: str, filters: dict):
+        """ホットペッパー スクレイパーを実行"""
+        HotpepperEstheScraper = _import_scraper("hotpepper", "HotpepperEstheScraper")
+
+        print(f"[Executor] ホットペッパー スクレイピング開始")
+
+        def on_progress(current, total):
+            self.client.send_progress(task_id, current, total)
+
+        def on_result(data):
+            self.client.send_result(task_id, data)
+
+        def is_running():
+            return not self._stop_flag
+
+        try:
+            scraper = HotpepperEstheScraper(
+                progress_callback=on_progress,
+                result_callback=on_result,
+                is_running_check=is_running,
+            )
+            self._current_scraper = scraper
+            count = scraper.run(filters)
+            if not self._stop_flag:
+                self.client.send_completed(task_id)
+                print(f"[Executor] 完了: {count}件取得")
+            else:
+                self.client.send_stopped(task_id, count)
+                print(f"[Executor] 停止: {count}件取得済み")
+        except Exception as e:
+            print(f"[Executor] ホットペッパー スクレイピングエラー: {e}")
             import traceback
             traceback.print_exc()
             self.client.send_error(task_id, str(e))
