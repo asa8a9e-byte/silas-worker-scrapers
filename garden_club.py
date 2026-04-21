@@ -52,6 +52,9 @@ class GardenClubScraper:
         total_prefs = len(prefectures)
         current_pref = 0
 
+        if self.progress_callback and total_prefs > 0:
+            self.progress_callback(0, total_prefs)
+
         for prefecture in prefectures:
             if not self.is_running_check():
                 print("[GardenClub] 停止リクエスト受信")
@@ -61,6 +64,9 @@ class GardenClubScraper:
             print(f"[GardenClub] [{current_pref}/{total_prefs}] {prefecture} スキャン開始...")
 
             self._scrape_prefecture(prefecture)
+
+            if self.progress_callback:
+                self.progress_callback(current_pref, total_prefs)
 
         return self.result_count
 
@@ -111,8 +117,6 @@ class GardenClubScraper:
                         self.result_count += 1
                         if self.result_callback:
                             self.result_callback(data)
-                        if self.progress_callback:
-                            self.progress_callback(self.result_count, 0)
 
                         print(f"[GardenClub] {data.get('company_name', 'N/A')[:30]}")
                         time.sleep(0.3)
