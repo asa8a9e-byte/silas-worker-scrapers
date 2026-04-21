@@ -1,7 +1,7 @@
 {
-  "version": "1.4.1",
-  "updated_at": "2026-02-07T23:10:00",
-  "changelog": "executor.py型ヒント修正（SaaSClient）",
+  "version": "1.4.2",
+  "updated_at": "2026-04-21T14:30:00",
+  "changelog": "hotpepper (美容室/ヘアサロン) スクレイパー追加",
   "files": [
     "executor.py",
     "google_maps.py",
@@ -13,6 +13,7 @@
     "ietatta.py",
     "hagukumi.py",
     "constmap.py",
-    "meo_checker.py"
+    "meo_checker.py",
+    "hotpepper.py"
   ]
 }
