@@ -165,19 +165,33 @@ class GoogleMapsScraper:
             return []
 
         # スクロールして全件取得
+        END_MARKER_TEXTS = ("リストの最後に到達しました", "You've reached the end of the list")
+        MAX_STABLE_ITERS = 20  # ~60s of no change as safety fallback when marker never appears
+
         prev_count = -1
         stable = 0
+        reached_end = False
 
-        while stable < 5:
+        while not reached_end and stable < MAX_STABLE_ITERS:
             if not self.is_running_check():
                 break
 
             self.driver.execute_script("arguments[0].scrollBy(0, 1000);", scroll_area)
             time.sleep(2)
 
+            # 1) End-of-list marker has priority — stop immediately when Google Maps confirms the list end
+            try:
+                feed_text = scroll_area.text or ""
+                if any(m in feed_text for m in END_MARKER_TEXTS):
+                    reached_end = True
+                    print("[Scraper] リストの最後に到達しました")
+                    break
+            except Exception:
+                pass
+
+            # 2) Fallback: count stability (only triggers when marker never appears)
             links = self._get_result_links()
             count = len(links)
-
             if count == prev_count:
                 stable += 1
             else:
