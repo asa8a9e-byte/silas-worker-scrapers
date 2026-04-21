@@ -4,7 +4,8 @@ Hotpepper スクレイパー (SaaS Worker版)
 """
 import re
 import time
-from typing import Callable, List, Optional
+from collections import deque
+from typing import Callable, Deque, List, Optional, Tuple
 
 import requests
 from bs4 import BeautifulSoup
@@ -244,6 +245,30 @@ class HotpepperEstheScraper:
         except Exception:
             return self._phone_from_text(soup.get_text())
 
+    def _extract_related_salon_ids(self, soup: BeautifulSoup) -> List[str]:
+        """詳細ページの「関連リンク」から系列店の salon_id を抽出"""
+        h3 = None
+        for tag in soup.find_all(["h3", "h4"]):
+            if "関連リンク" in tag.get_text():
+                h3 = tag
+                break
+        if not h3:
+            return []
+        ul = h3.find_next("ul")
+        if not ul:
+            return []
+        out: List[str] = []
+        seen: set[str] = set()
+        for a in ul.find_all("a", href=True):
+            m = re.search(r"/(slnH\d+)/", a["href"])
+            if not m:
+                continue
+            sid = m.group(1)
+            if sid not in seen:
+                seen.add(sid)
+                out.append(sid)
+        return out
+
     def run(self, filters: dict) -> int:
         """ホットペッパービューティー美容室リスト抽出（requests + BeautifulSoup）"""
         self.result_count = 0
@@ -253,6 +278,10 @@ class HotpepperEstheScraper:
 
         count = 0
         max_pages = 100
+        max_related = int(filters.get("max_related") or 500)
+        global_seen: set[str] = set()
+        related_queue: Deque[Tuple[str, str, str]] = deque()
+        detail_delay = 1.5
 
         for raw in areas:
             if not self.is_running_check():
@@ -294,18 +323,22 @@ class HotpepperEstheScraper:
                     if not self.is_running_check():
                         break
 
+                    if salon_id in global_seen:
+                        continue
+                    global_seen.add(salon_id)
+
                     detail_url = f"https://beauty.hotpepper.jp/{salon_id}/"
 
                     try:
                         dr = requests.get(detail_url, headers=HEADERS, timeout=30)
                     except Exception as e:
                         print(f"[HotpepperEsthe]   詳細取得エラー {salon_id}: {e}")
-                        time.sleep(1)
+                        time.sleep(detail_delay)
                         continue
 
                     if dr.status_code != 200:
                         print(f"[HotpepperEsthe]   詳細 {salon_id}: HTTP {dr.status_code}")
-                        time.sleep(1)
+                        time.sleep(detail_delay)
                         continue
 
                     dsoup = BeautifulSoup(dr.text, "html.parser")
@@ -316,6 +349,10 @@ class HotpepperEstheScraper:
                     hours = _extract_by_label(dsoup, "営業時間")
                     holiday = _extract_by_label(dsoup, "定休日")
                     phone = self._extract_phone(dsoup, detail_url)
+
+                    for rid in self._extract_related_salon_ids(dsoup):
+                        if rid not in global_seen and len(related_queue) < max_related:
+                            related_queue.append((rid, area_name, salon_id))
 
                     count += 1
                     self.result_count += 1
@@ -333,6 +370,7 @@ class HotpepperEstheScraper:
                                     "salon_id": salon_id,
                                     "business_hours": hours,
                                     "holiday": holiday,
+                                    "related_from": None,
                                 },
                             }
                         )
@@ -342,10 +380,85 @@ class HotpepperEstheScraper:
                     disp = name[:20] if name else salon_id
                     print(f"[HotpepperEsthe]   ✓ {disp}")
 
-                    time.sleep(1)
+                    time.sleep(detail_delay)
 
                 time.sleep(1)
 
             time.sleep(1.5)
+
+        if related_queue:
+            print(
+                f"[HotpepperEsthe] [関連リンク] {len(related_queue)}件の関連店舗を取得"
+            )
+
+        related_processed = 0
+        while related_queue and related_processed < max_related:
+            if not self.is_running_check():
+                break
+
+            salon_id, area_name, parent_id = related_queue.popleft()
+            if salon_id in global_seen:
+                continue
+            global_seen.add(salon_id)
+
+            detail_url = f"https://beauty.hotpepper.jp/{salon_id}/"
+
+            try:
+                dr = requests.get(detail_url, headers=HEADERS, timeout=30)
+            except Exception as e:
+                print(f"[HotpepperEsthe]   関連 詳細取得エラー {salon_id}: {e}")
+                time.sleep(detail_delay)
+                related_processed += 1
+                continue
+
+            if dr.status_code != 200:
+                print(
+                    f"[HotpepperEsthe]   関連 詳細 {salon_id}: HTTP {dr.status_code}"
+                )
+                time.sleep(detail_delay)
+                related_processed += 1
+                continue
+
+            dsoup = BeautifulSoup(dr.text, "html.parser")
+            h1 = dsoup.find("h1")
+            name = h1.get_text(strip=True) if h1 else ""
+
+            address = _extract_by_label(dsoup, "住所")
+            hours = _extract_by_label(dsoup, "営業時間")
+            holiday = _extract_by_label(dsoup, "定休日")
+            phone = self._extract_phone(dsoup, detail_url)
+
+            for rid in self._extract_related_salon_ids(dsoup):
+                if rid not in global_seen and len(related_queue) < max_related:
+                    related_queue.append((rid, area_name, salon_id))
+
+            count += 1
+            self.result_count += 1
+            related_processed += 1
+            if self.result_callback:
+                self.result_callback(
+                    {
+                        "company_name": name or salon_id,
+                        "address": address,
+                        "phone": phone,
+                        "portal_url": detail_url,
+                        "source": "ホットペッパービューティー",
+                        "raw_data": {
+                            "index": count,
+                            "area_name": area_name,
+                            "salon_id": salon_id,
+                            "business_hours": hours,
+                            "holiday": holiday,
+                            "related_from": parent_id,
+                        },
+                    }
+                )
+            if self.progress_callback:
+                self.progress_callback(self.result_count, 0)
+
+            disp = name[:20] if name else salon_id
+            print(f"[HotpepperEsthe]   ↳ 系列: {disp}")
+
+            time.sleep(detail_delay)
 
         return self.result_count
