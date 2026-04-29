@@ -1,7 +1,11 @@
 """
-IR 文書 PDF のテキスト抽出 →（必要時 OCR）→ チャンク → DB 保存（Phase B）。
+IR 文書 PDF のテキスト抽出 →（必要時 OCR）→ チャンク → DB 保存。
 
-Task 3 で Embedding を追加。
+DB 負荷対策:
+- ir_chunks への INSERT は embedding 計算後に 1 回だけ batch INSERT
+- 1 行ずつ UPDATE は禁止（HNSW rebuild が重い）
+- content_hash で冪等処理（同一 hash ならスキップ）
+- chunk_size=1500, overlap=200 で chunk 数を削減
 """
 
 from __future__ import annotations
@@ -34,10 +38,7 @@ def extract_text_pymupdf(pdf_path: str | Path) -> tuple[str, int]:
 
 
 def is_ocr_needed(text: str, page_count: int, threshold: int = 100) -> bool:
-    """1 ページあたりの平均文字数が threshold 未満なら OCR が必要とみなす。
-
-    True のとき ``process_pdf`` は Google Document AI（Layout Parser 想定）へフォールバックする。
-    """
+    """1 ページあたりの平均文字数が threshold 未満なら OCR が必要とみなす。"""
     if page_count <= 0:
         return True
     avg_chars = len(text.strip()) / page_count
@@ -46,13 +47,12 @@ def is_ocr_needed(text: str, page_count: int, threshold: int = 100) -> bool:
 
 def chunk_text(
     text: str,
-    chunk_size: int = 800,
-    overlap: int = 100,
+    chunk_size: int = 1500,
+    overlap: int = 200,
 ) -> list[dict[str, Any]]:
     """テキストを固定長チャンクに分割する。
 
-    Returns:
-        [{"chunk_index", "text", "chunk_start", "chunk_end"}, ...]
+    chunk_size=1500, overlap=200 で従来（800/100）比 chunk 数を約半減。
     """
     if chunk_size <= 0:
         return []
@@ -89,11 +89,7 @@ def extract_text_document_ai(
     location: str = "us",
     processor_id: str | None = None,
 ) -> str:
-    """Google Document AI で PDF を OCR。Layout Parser プロセッサで表組み・レイアウト構造を保持。
-
-    認証は ``GOOGLE_APPLICATION_CREDENTIALS`` 等、google-cloud 標準に従う。
-    プロセッサ ID は ``DOCUMENT_AI_PROCESSOR_ID``、プロジェクトは ``GOOGLE_CLOUD_PROJECT`` で指定可能。
-    """
+    """Google Document AI で PDF を OCR。"""
     project_id = project_id or os.environ.get("GOOGLE_CLOUD_PROJECT")
     processor_id = processor_id or os.environ.get("DOCUMENT_AI_PROCESSOR_ID")
 
@@ -112,16 +108,29 @@ def extract_text_document_ai(
     return doc.text or ""
 
 
+def _check_hash_skip(supabase: Any, document_id: int, new_hash: str) -> bool:
+    """既存の content_hash と一致すればスキップ（冪等処理）。"""
+    res = (
+        supabase.table("ir_documents")
+        .select("content_hash")
+        .eq("id", document_id)
+        .limit(1)
+        .execute()
+    )
+    if res.data and res.data[0].get("content_hash") == new_hash:
+        return True
+    return False
+
+
 def process_pdf(
     pdf_path: str | Path,
     supabase: Any,
     document_id: int,
     force_ocr: bool = False,
 ) -> dict[str, Any]:
-    """PyMuPDF で抽出し、不足時は Document AI にフォールバックしてチャンク化し DB を更新する。
+    """PyMuPDF で抽出し、不足時は Document AI にフォールバック。
 
-    Returns:
-        text_length, page_count, chunk_count, method
+    注意: ir_chunks への INSERT はしない（process_pdf_with_embedding で一括投入）。
     """
     path = Path(pdf_path)
     text, page_count = extract_text_pymupdf(path)
@@ -133,11 +142,22 @@ def process_pdf(
         method = "document_ai"
 
     c_hash = content_hash(text)
+
+    # 冪等チェック: 同一 hash ならスキップ
+    if _check_hash_skip(supabase, document_id, c_hash):
+        return {
+            "text_length": len(text),
+            "page_count": page_count,
+            "chunk_count": 0,
+            "method": method,
+            "skipped": True,
+        }
+
     chunks = chunk_text(text)
 
+    # ir_documents のメタ更新のみ（テキストは保存しない = DB 軽量化）
     supabase.table("ir_documents").update(
         {
-            "markdown_content": text,
             "extraction_method": method,
             "extraction_status": "完了",
             "content_hash": c_hash,
@@ -145,26 +165,13 @@ def process_pdf(
         }
     ).eq("id", document_id).execute()
 
-    supabase.table("ir_chunks").delete().eq("document_id", document_id).execute()
-
-    chunk_rows = [
-        {
-            "document_id": document_id,
-            "chunk_index": c["chunk_index"],
-            "chunk_text": c["text"],
-            "chunk_start": c["chunk_start"],
-            "chunk_end": c["chunk_end"],
-        }
-        for c in chunks
-    ]
-    if chunk_rows:
-        supabase.table("ir_chunks").insert(chunk_rows).execute()
-
     return {
         "text_length": len(text),
         "page_count": page_count,
         "chunk_count": len(chunks),
         "method": method,
+        "skipped": False,
+        "_chunks": chunks,  # process_pdf_with_embedding で使う
     }
 
 
@@ -196,31 +203,43 @@ async def process_pdf_with_embedding(
     document_id: int,
     force_ocr: bool = False,
 ) -> dict[str, Any]:
-    """process_pdf に続けて embedding を生成し ``ir_chunks`` を更新する。"""
+    """テキスト抽出 → embedding 計算 → ir_chunks に batch INSERT 1 発。
+
+    1 行ずつ UPDATE は行わない（HNSW rebuild 負荷を回避）。
+    """
     stats = process_pdf(pdf_path, supabase, document_id, force_ocr=force_ocr)
 
-    res = (
-        supabase.table("ir_chunks")
-        .select("id, chunk_index, chunk_text")
-        .eq("document_id", document_id)
-        .order("chunk_index")
-        .execute()
-    )
-    rows = res.data or []
-    chunks_from_db = [
-        {"chunk_index": r["chunk_index"], "text": r["chunk_text"], "id": r["id"]}
-        for r in rows
+    if stats.get("skipped"):
+        stats["embeddings_generated"] = 0
+        return stats
+
+    chunks = stats.pop("_chunks", [])
+    if not chunks:
+        stats["embeddings_generated"] = 0
+        return stats
+
+    # 既存 chunks を削除（冪等処理のため）
+    supabase.table("ir_chunks").delete().eq("document_id", document_id).execute()
+
+    # embedding 計算
+    embedded = await generate_embeddings(chunks)
+
+    # embedding 付き batch INSERT（1 発）
+    rows = [
+        {
+            "document_id": document_id,
+            "chunk_index": e["chunk_index"],
+            "chunk_text": e["text"],
+            "chunk_start": e["chunk_start"],
+            "chunk_end": e["chunk_end"],
+            "embedding": e["embedding"],
+            "embedding_model": "text-embedding-3-small",
+        }
+        for e in embedded
     ]
+    # 100 件ずつ batch INSERT
+    for i in range(0, len(rows), 100):
+        supabase.table("ir_chunks").insert(rows[i : i + 100]).execute()
 
-    if chunks_from_db:
-        embedded = await generate_embeddings(chunks_from_db)
-        for e in embedded:
-            supabase.table("ir_chunks").update(
-                {
-                    "embedding": e["embedding"],
-                    "embedding_model": "text-embedding-3-small",
-                }
-            ).eq("id", e["id"]).execute()
-
-    stats["embeddings_generated"] = len(chunks_from_db)
+    stats["embeddings_generated"] = len(embedded)
     return stats
